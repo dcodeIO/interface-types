@@ -1,16 +1,25 @@
 # Linking
 
-This document describes a core WebAssembly feature, *first-class modules*,
-that, when lifted into the second-class context of [Interface Types], would
-enable WebAssembly modules to control how their instances and their
-dependencies' instances are linked in a manner that is host-independent,
-predictably optimizable and without implicit dependency on garbage collection.
+This explainer introduces the WebAssembly Linking proposal. The explainer
+starts by describing a set of motivating use cases that have appeared
+in the WebAssembly ecosystem followed by a hypothetical core WebAssembly
+feature, *first-class modules*, which could address these use cases.
+Limitations of first-class modules (viz. around performance and dependency on
+GC) are explained and then addressed by lifting first-class modules into the
+second-class context of the *adapter functions* introduced by the [Interface
+Types] proposal. The resulting proposal enables WebAssembly modules to control
+how their dependencies' instances are instantiated and linked in a manner that
+is host-independent, predictably optimizable and without implicit dependency on
+garbage collection.
 
-While the underlying Interface Types proposal is itself still emerging, it's
-useful to map out this farther-future path eagerly both because there is active
-discussion around the wasm ecosystem for how to address the use cases outlined
-in this proposal and because this proposal may feed back changes into the
-underlying Interface Types proposal.
+While the Linking proposal started as a future extension of Interface Types,
+in its current form, the proposal suggests that Interface Types may be more
+naturally defined as an extension of Linking. In particular, the Linking proposal
+provides a more simple, orthogonal mechanism for describing how a core wasm
+module's imports and exports are *linked* to adapter functions, with the
+Interface Types proposal ultimately just introducing the actual new *interface
+types* (`string` et al) along with new instructions for producing and consuming
+values of these new types.
 
 1. [Motivation](#motivation)
     1. [Command modules](#command-modules)
@@ -20,7 +29,7 @@ underlying Interface Types proposal.
     1. [Module and instance types](#module-and-instance-types)
     2. [Single-level imports](#single-level-imports)
     3. [Module and instance imports](#module-and-instance-imports)
-    4. [Module and instance references and instructions](#module-and-instnace-references-and-instructions)
+    4. [Module and instance references](#module-and-instance-references)
     5. [Nested modules](#nested-modules)
     6. [Module and instance exports](#module-and-instance-exports)
 3. [Determinate module import linking](#determinate-module-import-linking)
@@ -29,14 +38,8 @@ underlying Interface Types proposal.
     2. [Dynamic shared-everything linking revisited](#dynamic-shared-everything-linking-revisited)
     3. [Link-time virtualization revisited](#link-time-virtualization-revisited)
 5. [Second-class modules](#second-class-modules)
-    1. [Lifting first-class modules into the Interface Types](#lifting-first-class-modules-into-interface-types)
-    2. [Declarative linking via constructors](#declarative-linking-via-constructors)
-    3. [Reframing the Interface Types proposal in terms of nested modules](#reframing-the-interface-types-proposal-in-terms-of-nested-modules)
-    4. [Recovering the command module pattern](#recovering-the-command-module-pattern)
-6. [Use cases re-revisited](#use-cases-re-revisited)
-    1. [Command modules re-revisited](#command-modules-re-revisited)
-    2. [Dynamic shared-everything linking re-revisited](#dynamic-shared-everything-linking-re-revisited)
-    3. [Link-time virtualization re-revisited](#link-time-virtualization-re-revisited)
+    1. [The static use-def property of adapter code](#the-static-use-def-property-of-adapter-code)
+    2. [Interface Modules](#interface-modules)
 
 
 ## Motivation
@@ -410,7 +413,7 @@ time.
 But how do we actually go about instantiating an imported module?
 
 
-### Module and instance references and instructions
+### Module and instance references
 
 Symmetric to the [function references] proposal, module and instance types can
 used in reference type that can be passed around as first-class values.
@@ -572,6 +575,10 @@ module/instance index space can be (re)exported, just like everything else:
 Because of the lack of "nested instances", as described in the previous
 section, instance exports are necessarily re-exports of instance imports.
 
+### Constructors
+
+TODO
+
 
 ## Determinate module import linking
 
@@ -585,41 +592,40 @@ To see the problem, let's look at the dependency diagram from the
 <p align="center"><img src="./shared-everything.svg" width="650"></p>
 
 Let's assume for the moment that each of the dependency arrows between `.wasm`
-modules become module imports in the client module (the
-[next section](#dynamic-shared-everything-linking-revisited) will describe why
-and how in more detail). This means that, e.g., the module type of `zip.wasm`
-and `img.wasm` will be:
+modules become module imports in the client module (we'll see why when
+revisiting the dynamic-shared-everything use case [below](#dynamic-shared-everything-linking-revisited)).
+This means that, e.g., the module type of `zip.wasm` and `img.wasm` will be:
 ```wasm
 (module
-  (import "libc.wasm" (module ...))
-  (import "libm.wasm" (module ...))
+  (import "libc" (module ...))
+  (import "libm" (module ...))
   ...
 )
 ```
 which means that the module type of `viz.wasm` will be:
 ```wasm
 (module
-  (import "zip.wasm" (module
-    (import "libc.wasm" (module ...))
-    (import "libm.wasm" (module ...))
+  (import "zip" (module
+    (import "libc" (module ...))
+    (import "libm" (module ...))
     ...
   )
-  (import "img.wasm" (module
-    (import "libc.wasm" (module ...))
-    (import "libm.wasm" (module ...))
+  (import "img" (module
+    (import "libc" (module ...))
+    (import "libm" (module ...))
     ...
   )
   ...
 )
 ```
-When `viz.wasm` calls `module.instantiate` to instantiate its imported
-`zip.wasm` and `img.wasm` modules, `viz.wasm` will need to get `libc.wasm` and
-`libm.wasm` from *somewhere*. One option is to embed `libc.wasm` and `libm.wasm`
-into `viz.wasm` as nested modules, but now these shared libraries can't be
-shared with the broader app, which may contain other uses of these same shared
-libraries. To enable maximal sharing, `viz.wasm` needs to import `libc.wasm` and
-`libm.wasm` *itself*. But now we have a design where ultimately the root module
-of a module graph ends up importing *every single* transitive dependency!
+When `viz` calls `module.instantiate` to instantiate its imported `zip` and
+`img` modules, `viz` will need to get `libc` and `libm` from *somewhere*. One
+option is to embed `libc.wasm` and `libm.wasm` into `viz.wasm` as nested
+modules, but now these shared libraries can't be shared with the broader app,
+which may contain other uses of these same shared libraries. To enable maximal
+sharing, `viz` needs to import `libc` and `libm` *itself*. But now we have a
+design where ultimately the root module of a module graph ends up importing
+*every single* transitive dependency!
 
 To resolve this tension we need a mechanism that has qualities of both module
 imports and nested modules: something that allows sharing of dependencies but
@@ -695,41 +701,52 @@ addressed.
 
 ### Command modules revisited
 
-TODO: words
+TODO: fill in words; but the shape of the solution is:
 
 ```wasm
 (module
   (type $WasiFileInstance (instance
     ...
   ))
-  (import "wasi:file" (type $WasiFileInstance))
+  (import "wasi:file" (instance $file
+    (type $WasiFileInstance)
+  )
   (module $main
     (import "wasi:file" (type $WasiFileInstance))
-    (func (export "main") (param i32) (result i32)
+    (func (export "main") (param i32 i32) (result i32)
       ...
     )
   )
-  (func (export "run") (param i32) (result i32)
+  (func (export "run") (param i32 i32) (result i32)
     (call_ref
       (instance.export "main"
         (module.instantiate
-          (instance.get $i)))
-      (local.get 0))
+          (ref.instance $file)))
+      (local.get 0)
+      (local.get 1))
   )
 )
 ```
 
+* note we use a typedef (`$WasiFileInstance`) to avoid repeating the instance type N times
+* note that `wasi:file` is imported once by the outer module and used to instantiate `$main` each time the export is called
+* note we're not using Interface Types (yet); that'll come [later](#use-cases-re-revisited)
+
+
 ### Dynamic shared-everything linking revisited
 
-TODO: words
+TODO: fill in words; but the shape of the solution is:
 
 ```wasm
 // libc.wasm
 (module
   (memory (export "memory"))
   (func (export "malloc") (param i32) (result i32) ...)
+  ...
 )
 ```
+
+* `libc.wasm` is shipped with the compiler as part of the sysroot
 
 ```wasm
 // libm.wasm
@@ -737,6 +754,7 @@ TODO: words
   (type $LibcInstance (instance
     (memory (export "memory"))
     (func (export "malloc") (param i32) (result i32))
+    ...
   ))
   (import "libc" (type $LibcInstance))
 
@@ -744,7 +762,8 @@ TODO: words
 )
 ```
 
-* note instance import
+* note libc is imported as an instance, allowing a client to choose which libc instance
+* this would be the convention for *all* `-shared` libraries
 
 ```wasm
 // zip.wasm
@@ -752,8 +771,9 @@ TODO: words
   (type $LibcInstance (instance
     (memory (export "memory"))
     (func (export "malloc") (param i32) (result i32))
+    ...
   ))
-  (import "./libc" (module $Libc
+  (import "./libc.wasm" (module $Libc
     (exports $LibcInstance)
   ))
 
@@ -765,54 +785,50 @@ TODO: words
     (exports $LibmInstance)
   ))
 
-  (module $main
-    (import "libc" (type $LibcInstance))
-    (import "libm" (type $LibmInstance))
-    (func (export "run") (param i32 i32) (result i32 i32)
-      ...
-    )
+  (import "libc" (type $LibcInstance))
+  (import "libm" (type $LibmInstance))
+  (func (export "run") (param i32 i32) (result i32 i32)
+    ...
   )
 
-  (@interface func (export "zip") (param $in (array u8)) (result (array u8))
+  (ctor
     module.instantiate $Libc
     (let (local $libc (ref $LibcInstance))
       (module.instantiate $libm (local.get $libc))
       (let (local $libm (ref $LibmInstance))
-        (module.instantiate $main (local.get $libc) (local.get $libm))
-        (return
-          (memory-to-array
-            (call_ref
-              (instance.export "run")
-              (array-to-memory (local.get $in))
-            )
-          )
-        )
+        module.instantiate $main (local.get $libc) (local.get $libm)
+        return
       )
     )
   )
 )
 ```
-* note determinate *module* imports, not *instance*
-* `(exports $FooInstance)` is syntactic sugar
+* note we're using a syntactic sugar `(exports $FooInstance)` to inject the exports of an instance type into a module type, to avoid repeating it all. there may be better way to do this
+* note that, as the main module, `zip.wasm` gets to choose *which* libc/libm via determinate module imports
+* again, not using Interface Types (yet)
 
 ```wasm
 // viz.wasm
 (module
-  (import "zip.wasm" (module
+  (import "./zip.wasm" (module
     (func (export "run") (param (array u8)) (result (array u8)))
   ))
-  (import "zip.wasm" (module
+  (import "./img.wasm" (module
     (func (export "run") (param (array u8)) (result (array u8)))
   ))
   ...
 )
 ```
-* note no mention of libc/libm
+* note no mention of libc/libm; they are encapsulated by `zip.wasm` and `viz.wasm`
+* whether or not `zip.wasm` and `img.wasm` share `libc.wasm` is determined by if their determinate module URLs resolve to the same module
+* a build-time tool is responsible for writing the URLs in to the module imports
+* here, the build-time tool has put everything into the same directory and pointed both `zip.wasm` and `viz.wasm` at the same `libc.wasm`
+* it is the job of a higher-level build-time tool (e.g., make system, IDE or package manager) to unify or duplicate (based on semver or just byte equality)
 
 
 ### Link-time virtualization revisited
 
-TODO: words
+TODO: fill in words; but the shape of the solution is:
 
 ```wasm
 // child.wasm
@@ -825,6 +841,8 @@ TODO: words
   ...
 )
 ```
+
+* `child.wasm` imports `wasi:file` with an instance import (it has no other choice)
 
 ```wasm
 // attenuate.wasm
@@ -840,6 +858,12 @@ TODO: words
 )
 ```
 
+* `attenuate.wasm` imports `wasi:file` with an instance import and then defines exports that match
+  the `wasi:file` instance type
+* thus `attenuate.wasm` is a function mapping `wasi:file` instances to new (attenuated) `wasi:file` instances
+* how this attenuation policy is passed to `attenuate.wasm` is in the `...`
+  
+
 ```wasm
 // parent.wasm
 (module
@@ -847,11 +871,36 @@ TODO: words
     (func (export "write") ...)
     ...
   ))
-  (import "wasi:file" (type $WasiFileInstance))
+  (import "wasi:file" (instance $file
+    (type $WasiFileInstance)
+  ))
+
+  (import "./attenuate.wasm" (module $attenuate
+    (import "wasi:file" (instance $WasiFileInstance))
+    (exports $WasiFileInstance)
+  ))
+  (import "./child.wasm" (module $child
+    (import "wasi:file" (instance $WasiFileInstance))
+    ...
+  ))
+
+  ...
+
+  (ctor
+    ref.instance $file
+    module.instantiate $attenuate
+    module.instantiate $child
+    ...
+  )
 )
 ```
 
-* note why determinate module import linking isn't a violation
+* by importing `child.wasm` as a module, `parent.wasm` has complete control
+  over how it is instantiated and what gets passed in
+* note that determinate module import linking doesn't violate the parent's
+  control over the child: the child can only import code that it could've
+  written itself (in a nested module). Importing a module never gives you
+  a capability.
 
 
 ## Second-class modules
@@ -882,7 +931,7 @@ properly optimize interface types.
 
 TODO: segue into...
 
-### Declarative Adapter Code
+### The static use-def property of adapter code
 
 TODO:
 * the static-use-def property
@@ -917,19 +966,7 @@ TODO: show command module pattern
 )
 ```
 
-### Constructors
-
-TODO
-
-
-### Rebasing Interface Types on Second-class Modules
-
-TODO:
-* start with just the above proposal
-* add in the interface types and lifting/lowering instructions
-* then a `func` of an interface module subsumes `(@interface func)`s
-
-TODO: so if you start with:
+TODO: so instead of writing:
 ```wasm
 (module
   (@interface func $a (import ...) ...)
@@ -939,7 +976,7 @@ TODO: so if you start with:
   (@interface func $d (export ...) ...)
 )
 ```
-Then it can be rewritten:
+you could write:
 ```wasm
 (@interface module
   (@interface $import-adapter module
@@ -959,11 +996,6 @@ Then it can be rewritten:
   )
 )
 ```
-
-## Use cases re-revisited
-
-TODO
-
 
 
 [Type section]: https://webassembly.github.io/spec/core/binary/modules.html#binary-typesec
