@@ -32,14 +32,17 @@ values of these new types.
     4. [Module and instance references](#module-and-instance-references)
     5. [Nested modules](#nested-modules)
     6. [Module and instance exports](#module-and-instance-exports)
-3. [Determinate module import linking](#determinate-module-import-linking)
-4. [Use cases revisited](#use-cases-revisited)
+    7. [Constructors](#constructors)
+    8. [Determinate module import linking](#determinate-module-import-linking)
+3. [Use cases revisited](#use-cases-revisited)
     1. [Command modules revisited](#command-modules-revisited)
     2. [Dynamic shared-everything linking revisited](#dynamic-shared-everything-linking-revisited)
     3. [Link-time virtualization revisited](#link-time-virtualization-revisited)
-5. [Second-class modules](#second-class-modules)
-    1. [The static use-def property of adapter code](#the-static-use-def-property-of-adapter-code)
-    2. [Interface Modules](#interface-modules)
+4. [Second-class modules](#second-class-modules)
+    1. [The static def-use property of adapter functions](#the-static-def-us-property-of-adapter-functions)
+    2. [Naively lifting first-class modules](#naively-lifting-first-class-modules)
+    3. [Interface Modules](#interface-modules)
+    4. [When can a module be destroyed?](#when-can-a-module-be-destroyed)
 
 
 ## Motivation
@@ -560,8 +563,7 @@ proposed here.
 
 ### Module and instance exports
 
-To close out the first-class module feature, all modules and instances in the
-module/instance index space can be (re)exported, just like everything else:
+Modules and instances can also be (re)exported, just like everything else:
 ```wasm
 (module
   (module $m1 ...)
@@ -573,18 +575,26 @@ module/instance index space can be (re)exported, just like everything else:
 )
 ```
 Because of the lack of "nested instances", as described in the previous
-section, instance exports are necessarily re-exports of instance imports.
+section, instance exports can only be re-exports of instance imports.
+
 
 ### Constructors
 
-TODO
+TODO:
+* `module.instantiate-self`
+* would be a new special section containing the constructor. mostly validated
+  just like normal function, but special:
+  * no declared results; the result type is fixed
+  * not in the function index space; is only be called when the module is
+    instantiated
+* relation to `start` function
 
 
 ## Determinate module import linking
 
-Before we can see how first-class modules address the use cases, there is
-one more problem to be solved: module imports force all private dependencies of
-a module to be exposed in its public API to be explicitly by its clients.
+To finish out the first-class module feature, there is one more problem to be
+solved: module imports force all private dependencies of a module to be exposed
+in its public API to be explicitly by its clients.
 
 To see the problem, let's look at the dependency diagram from the
 [dynamic shared-everything linking use case](#dynamic-shared-everything-linking):
@@ -694,9 +704,8 @@ about addressing our use cases.
 
 ## Use cases revisited
 
-With first-class modules and determinate module import linking, we can now
-revisit the motivating use cases identified above and see how they are
-addressed.
+With first-class modules introduced, we can now revisit the motivating use cases
+identified above and see how they are addressed.
 
 
 ### Command modules revisited
@@ -710,8 +719,8 @@ TODO: fill in words; but the shape of the solution is:
   ))
   (import "wasi:file" (instance $file
     (type $WasiFileInstance)
-  )
-  (module $main
+  ))
+  (module $core
     (import "wasi:file" (type $WasiFileInstance))
     (func (export "main") (param i32 i32) (result i32)
       ...
@@ -720,7 +729,7 @@ TODO: fill in words; but the shape of the solution is:
   (func (export "run") (param i32 i32) (result i32)
     (call_ref
       (instance.export "main"
-        (module.instantiate
+        (module.instantiate $core
           (ref.instance $file)))
       (local.get 0)
       (local.get 1))
@@ -728,9 +737,7 @@ TODO: fill in words; but the shape of the solution is:
 )
 ```
 
-* note we use a typedef (`$WasiFileInstance`) to avoid repeating the instance type N times
-* note that `wasi:file` is imported once by the outer module and used to instantiate `$main` each time the export is called
-* note we're not using Interface Types (yet); that'll come [later](#use-cases-re-revisited)
+* note that `wasi:file` is imported once by the outer module and used to instantiate `$core` each time the export is called
 
 
 ### Dynamic shared-everything linking revisited
@@ -764,6 +771,8 @@ TODO: fill in words; but the shape of the solution is:
 
 * note libc is imported as an instance, allowing a client to choose which libc instance
 * this would be the convention for *all* `-shared` libraries
+* just like functions of imported instances, the memory of an imported instance
+  gets added to the memory index space, becoming, in this case, the default memory (memory 0)
 
 ```wasm
 // zip.wasm
@@ -803,22 +812,25 @@ TODO: fill in words; but the shape of the solution is:
   )
 )
 ```
+
 * note we're using a syntactic sugar `(exports $FooInstance)` to inject the exports of an instance type into a module type, to avoid repeating it all. there may be better way to do this
 * note that, as the main module, `zip.wasm` gets to choose *which* libc/libm via determinate module imports
-* again, not using Interface Types (yet)
+* note that, because the `ctor` has no params, the resulting module type has no
+  imports, only the one exported `run` as we see below:
 
 ```wasm
 // viz.wasm
 (module
   (import "./zip.wasm" (module
-    (func (export "run") (param (array u8)) (result (array u8)))
+    (func (export "run") (param i32 i32) (result i32 i32))
   ))
   (import "./img.wasm" (module
-    (func (export "run") (param (array u8)) (result (array u8)))
+    (func (export "run") (param i32 i32) (result i32 i32))
   ))
   ...
 )
 ```
+
 * note no mention of libc/libm; they are encapsulated by `zip.wasm` and `viz.wasm`
 * whether or not `zip.wasm` and `img.wasm` share `libc.wasm` is determined by if their determinate module URLs resolve to the same module
 * a build-time tool is responsible for writing the URLs in to the module imports
@@ -835,10 +847,10 @@ TODO: fill in words; but the shape of the solution is:
 (module
   (type $WasiFileInstance (instance
     (func (export "write") ...)
-    ...
   ))
   (import "wasi:file" (type $WasiFileInstance))
-  ...
+  
+  (func (export "play") ...)
 )
 ```
 
@@ -849,12 +861,10 @@ TODO: fill in words; but the shape of the solution is:
 (module
   (type $WasiFileInstance (instance
     (func (export "write") ...)
-    ...
   ))
   (import "wasi:file" (type $WasiFileInstance))
-  ...
+
   (func (export "write") ...)
-  ...
 )
 ```
 
@@ -869,7 +879,6 @@ TODO: fill in words; but the shape of the solution is:
 (module
   (type $WasiFileInstance (instance
     (func (export "write") ...)
-    ...
   ))
   (import "wasi:file" (instance $file
     (type $WasiFileInstance)
@@ -879,18 +888,24 @@ TODO: fill in words; but the shape of the solution is:
     (import "wasi:file" (instance $WasiFileInstance))
     (exports $WasiFileInstance)
   ))
+
+  (type $ChildInstance (instance
+    (func (export "play") ...)
+  ))                         
   (import "./child.wasm" (module $child
     (import "wasi:file" (instance $WasiFileInstance))
-    ...
+    (exports $ChildInstance)
   ))
 
-  ...
+  (import "child" (instance
+    (type $ChildInstance)
+  ))
 
   (ctor
     ref.instance $file
     module.instantiate $attenuate
     module.instantiate $child
-    ...
+    module.instantiate_self
   )
 )
 ```
@@ -905,97 +920,133 @@ TODO: fill in words; but the shape of the solution is:
 
 ## Second-class modules
 
-Unfortunately, linking is not fully solved by first-class modules.
+While the preceding section shows how the use cases can be functionally solved
+by first-class modules, there remain several practical problems with first-class
+modules:
 
-One problem with a first-class instantiation API is that it fundamentally
-depends on GC. The reason is that, by containing mutable reference cells
-(globals and tables), wasm instances can participate in arbitrary cyclic graphs
-that require some form of GC (or cycle collection) to collect. As a general
-rule, WebAssembly standardization avoids creating any hard dependencies on GC
-(for anything outside the [GC proposal]). This choice is essential to the high
-degree of embeddability of wasm, allowing GC support to be optional on hosts
-that need a small footprint.
+First, first-class modules fundamentally depend on GC because, by containing
+mutable reference cells (globals and tables), wasm instances can participate in
+arbitrary cyclic graphs. As a general rule, WebAssembly standardization avoids
+creating any hard dependencies on GC for anything outside the [GC proposal].
+In particular, one of our motivating use cases is shared-everything dynamic
+linking for C/C++, where there is otherwise no need for GC.
 
-Even if a host does include GC, another problem is that the fundamental dynamism
-of first-class modules inhibits some predictable performance optimizations that
-we'd like. In particular, it should be possible to:
-* Ahead-of-Time compile a load-time-linked DAG of modules into a native binary
-  with static memory allocations for instances (as is done today for MVP wasm).
-* Eagerly release memory for command instances immediately after the command
-  completes, similar to joining on an OS subprocess.
+The second problem is that the purely runtime nature of first-class module
+linking prevents various desirable optimizations and compilation techniques that
+need to know the linking structure ahead-of-time. In particular, it should be
+possible to reliably compile a linked set of modules into a single,
+statically-linked, optimized blob of machine code which includes the compiled
+interface adapter trampolines of [Interface Types].
 
-Lastly, linking should not be mutually exclusive to the use of interface types.
-As a core wasm feature, first-class modules provide no way to express interface
-types nor allow the instantiation-time adapter function fusion necessary to
-properly optimize interface types.
+Lastly, we need to say how Interface Types can be used with linking
+*at all*, given that first-class modules are a core wasm feature and
+Interface Types are designed to be layered on top of core wasm. 
 
-TODO: segue into...
+Ultimately, the solution to all three boils down to the same thing: lifting
+first-class modules into the second-class context of interface adapter
+functions.
 
-### The static use-def property of adapter code
 
-TODO:
-* the static-use-def property
-* calls always inline, analyze use-defs of fully inlined callstack as one nested function
-* as long as instance reference doesn't escape to core wasm code, we avoid GC
-* technicality: transitive references that entrain instances: funcrefs
-* validation requirements to avoid GC
+### The static def-use property of adapter functions
+
+Interface adapter functions, as introduced by the [Interface Types] proposal
+have a vaguely "declarative" property that is useful to define more precisely,
+since this property is what we need for linking. While adapter functions are
+composed of stack instructions, just like core wasm, the set of instructions
+and validation rules ensure that **every definition of an interface value flows
+into the same set of uses on every (non-trapping) execution and every use of an
+interface value comes from exactly one definition**. Until a better name
+appears, we call this the "static def-use property" of adapter functions.
+
+How do the adapter function constraints ensure the static def-use property?
+First, calls between adapter functions are required to be non-recursive and thus
+adapter function bodies can always be statically inlined into their caller.
+(Indeed, efficient [fusing] of lifting and lowering adapter instructions requires
+this.) Next, adapter instructions do not include the normal core wasm control
+flow instructions like `br_if` or `if`. Instead, adapter code is mostly
+sequential with functional-style lifting/lowering instructions for sequences and
+variants that specifically preserve the static def-use property.
+
+Thus, if we consider instance references as *interface types* (not core wasm
+types) and `module.instantiate` as an *adapter instruction* that is both a
+definition (of the new instance) and a use (of the imported instances), the
+static def-use property implies that there will be a static structure to any DAG
+of instances produced by adapter functions. This static structure is most of
+what we need to solve the problems introduced above.
+
+
+### Naively lifting first-class modules
+
+TODO: flesh out
+
+* Easy: just prefix instance/module imports, nested modules and ctors with `@interface`
+* Add instance/module types only to the set of interface types, not core wasm types
+* Example(s) from first-class to second-class
 
 
 ### Interface Modules
 
-TODO:
-* no changes to core modules (no first-class modules)
-* create new kind of module: interface modules
-* interface modules are like core modules but:
-  * only declarative adapter code
-  * no memory/table
-* interface modules gain all the first-class module features mentioned above
-  * because module.instantiate can only be used in declarative adapter code,
-    it's "second-class modules"
+TODO: flesh out
 
-TODO: show command module pattern
-```wasm
-(@interface module
-  (import "wasi:file" (instance $file ...))
-  (module $core ...)
-  (func (export "grep") (param ...) (result ...)
-    module.instantiate $core
-    instance.exports "main"
-    call_ref
-  )
-)
-```
+* It's kindof weird that all nested modules would go inside the interface
+  adapter section. That will be 99% of the bytes of many modules.
+* Ultimately, having a section that wraps the containing module in a
+  containing module is weird and confusing to people.
+* Initially interface adapter section just contained small annotations,
+  but has now grown into practically its own mini module format with
+  types section, imports, exports, functions subsections.
+* With nested modules and linking, we can actually make interface adapters
+  into actual real modules:
 
-TODO: so instead of writing:
-```wasm
-(module
-  (@interface func $a (import ...) ...)
-  (func $b (import ...) ...)
-  (@interface implement (import ...))
-  (func $c (export ...) ...)
-  (@interface func $d (export ...) ...)
-)
-```
-you could write:
-```wasm
-(@interface module
-  (@interface $import-adapter module
-    (func $a (import ...) ...)
-  )
-  (module $core-module
-    (func $b (import ...) ...)
-    (func $c (export ...) ...)
-  )
-  (@interface $export-adapter module 
-    (func $d (export ...) ...)
-  )
-  (ctor
-    module.instantiate $import-adapter
-    module.instantiate $core-module
-    module.instantiate $export-adapter
-  )
-)
-```
+1. There are two kinds of modules core modules `(module ...)` and interface modules `(@interface module ...)`
+2. Interface modules use the same structure as core modules, but:
+  * Only support a subset of the sections (types, imports, exports, function, code)
+  * Enriched set of Interface Types anywhere there is a core wasm type in core
+    modules.
+3. Interface modules are additionally allowed to:
+  * Use all the first-class module features described above
+  * Which means containing nested modules
+  * A nested module can either be an interface module or a core module
+  * Thus, a `.wasm` file forms a tree whose leaves are core modules and all
+    non-leaves are interface modules
+4. Interface modules use the same binary encoding as core modules, using a bit of the "version" word
+   to discriminate. The goal is to reuse most of a wasm decoder/validator, with 
+   extra branches to accept/reject various types/instructions/sections/... where they
+   are decoded.
+
+* From an implementation perspective, an interface module ultimately compiles
+  down to trampolines for entering, exiting and connecting core wasm modules.
+  An interface module does not need its own reified instance/module data structures.
+
+
+### When can a module be destroyed?
+
+TODO: flesh out
+
+* Host is going to instantiate a root module and keep that alive for a
+  host-determined lifetime. E.g.:
+  * ESM-integration will keep alive as long as global object (lifetime of tab)
+  * CLI might keep alive for a single export call
+  * Reverse-proxy might keep alive for only the duration of a request
+* The root module's constructor (default or otherwise) will return an instance reference
+* If that instance is produced by `module.instantiate(-self)`, any import is
+  transitively of the same lifetime as the root instance.
+* Static use-def property allows transitively reaching all imports, statically,
+  so all reachable instances can be bunched into a single host-determined instance-DAG
+  lifetime.
+* What about an instance that is not transitively reached by the root instance?
+* E.g., trivial case (instantiate -> call export)
+* This is the command use case
+* Can host simply destroy when the instance ref is dropped (again, a static property)?
+* No: if the instance created references from an existing instance to itself
+* E.g., funcref installed in imported table via elem section. Could expect for `dlopen()`
+* However, host can statically detect this by analyzing the instantiated module
+  type. *enumerate cases*
+* Non-GC host has two choices:
+  1. statically reject when type may keep alive
+  2. assume has same lifetime as root instance DAG, keep alive until root instance DAG destroyed
+* More conservative to do the first: could be standardized as part of Interface
+  Module validation. Effectively defines commands to be those that can be immediately destroyed.
 
 
 [Type section]: https://webassembly.github.io/spec/core/binary/modules.html#binary-typesec
@@ -1021,6 +1072,7 @@ you could write:
 [Namespace Object]: https://tc39.es/ecma262/#sec-module-namespace-objects
 
 [Interface Types]: https://github.com/WebAssembly/interface-types/blob/master/proposals/interface-types/Explainer.md
+[Fusing]: https://github.com/WebAssembly/interface-types/blob/master/proposals/interface-types/Explainer.md#lifting-lowering-and-laziness
 [Abstract Types]: https://github.com/WebAssembly/proposal-type-imports/blob/master/proposals/type-imports/Overview.md
 [Module Types]: https://github.com/WebAssembly/module-types/blob/master/proposals/module-types/Overview.md
 [Multi-memory]: https://github.com/webassembly/multi-memory
